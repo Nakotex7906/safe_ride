@@ -1,0 +1,5 @@
+package com.example.safe_ride
+
+import io.flutter.embedding.android.FlutterActivity
+
+class MainActivity : FlutterActivity()
