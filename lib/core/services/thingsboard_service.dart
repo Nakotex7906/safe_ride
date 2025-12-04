@@ -26,34 +26,57 @@ class ThingsboardService {
 
   /// Consulta a ThingsBoard si el dispositivo reportó una caída
   Future<bool> checkFallStatus() async {
-    // Usamos el endpoint para leer atributos del cliente (lo que envía el ESP8266)
+    // URL para obtener atributos de cliente
     final url = Uri.parse('${AppConfig.tbBaseUrl}/${AppConfig.deviceToken}/attributes?clientKeys=estado_caida');
 
     try {
+      print("--- CONSULTANDO THINGSBOARD ---"); // Debug
       final response = await http.get(url);
+
+      print("Status: ${response.statusCode}"); // Debug: Debe ser 200
+      print("Cuerpo: ${response.body}");       // Debug: Aquí veremos qué llega exactamente
 
       if (response.statusCode == 200) {
         final Map<String, dynamic> data = jsonDecode(response.body);
-        // ThingsBoard devuelve algo como: {"client": {"estado_caida": true}}
+
+        // Verificamos si la respuesta tiene la estructura {"client": { ... }}
         if (data.containsKey('client') && data['client'].containsKey('estado_caida')) {
-          // Convertimos a string y comparamos por si llega como "true" o true booleano
-          return data['client']['estado_caida'].toString() == 'true';
+          final valor = data['client']['estado_caida'];
+          print("Valor encontrado: $valor (Tipo: ${valor.runtimeType})"); // Debug
+
+          // Lógica robusta: Acepta true (bool), "true" (string), 1 (int), "1" (string)
+          return valor == true ||
+              valor.toString().toLowerCase() == 'true' ||
+              valor == 1 ||
+              valor.toString() == '1';
+        } else {
+          print("AVISO: La llave 'estado_caida' no vino en la respuesta.");
         }
+      } else {
+        print("ERROR: La petición falló. Revisa tu Token en el archivo .env");
       }
     } catch (e) {
-      print('Error consultando caída: $e');
+      print('Excepción consultando caída: $e');
     }
-    return false; // Si falla o no hay datos, asumimos que no hay caída
+    return false;
   }
 
-  /// Resetea la alarma en ThingsBoard después de atenderla
-  Future<void> resetFallStatus() async {
+  /// Resetea la alarma en ThingsBoard estableciendo 'estado_caida' en false.
+  /// Esto es crucial para evitar que la App entre en un bucle de alertas
+  /// si el dispositivo no resetea la variable automáticamente.
+  Future<bool> resetFallStatus() async {
     final url = Uri.parse('${AppConfig.tbBaseUrl}/${AppConfig.deviceToken}/attributes');
-    await http.post(
+    try {
+      final response = await http.post(
         url,
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'estado_caida': false})
-    );
+        body: jsonEncode({'estado_caida': false}),
+      );
+      return response.statusCode == 200;
+    } catch (e) {
+      print('Error reseteando estado de caída: $e');
+      return false;
+    }
   }
 
 }

@@ -111,29 +111,36 @@ class _HomeScreenState extends State<HomeScreen> {
 
     showDialog(
       context: context,
-      barrierDismissible: false, // El usuario NO puede cerrar tocando afuera
+      barrierDismissible: false,
       builder: (context) {
         return EmergencyDialog(
-          onCancel: () {
-            // El usuario dijo "Estoy bien"
+          onCancel: () async {
+            // 1. Cerrar diálogo
             Navigator.of(context).pop();
+
+            // 2. Resetear la alarma en ThingsBoard para no volver a dispararla
+            //    inmediatamente en el próximo ciclo del timer.
+            await _tbService.resetFallStatus();
+
             setState(() {
               _isEmergencyActive = false;
               _log = "Alerta cancelada por el usuario.";
             });
-            // Opcional: Avisar a ThingsBoard que fue falsa alarma
-            // _tbService.resetFallStatus();
           },
           onTimeout: () async {
-            // Se acabó el tiempo: ENVIAR CORREO
             Navigator.of(context).pop();
             setState(() => _log = "Enviando ayuda...");
 
+            // Enviar correo
             bool sent = await _emailService.sendEmergencyEmail(pos.latitude, pos.longitude);
+
+            // IMPORTANTE: Resetear la alarma en ThingsBoard también aquí,
+            // porque la emergencia ya fue procesada.
+            await _tbService.resetFallStatus();
 
             if (mounted) {
               setState(() {
-                _isEmergencyActive = false; // Volvemos a estado normal (o detener tracking si prefieres)
+                _isEmergencyActive = false;
                 _log = sent ? "AYUDA SOLICITADA \nCorreo enviado." : "Error al enviar ayuda.";
               });
               ScaffoldMessenger.of(context).showSnackBar(
