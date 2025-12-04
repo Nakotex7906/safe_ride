@@ -14,6 +14,10 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+
+  LatLng? _startPosition; // Coordenada de inicio
+  LatLng? _endPosition;
+
   // Servicios
   final _tbService = ThingsboardService();
   final _emailService = EmailService();
@@ -50,6 +54,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _startTracking() async {
+    Position initialPos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
@@ -59,8 +64,11 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _isTracking = true;
       _routePoints.clear();
+      _startPosition = LatLng(initialPos.latitude, initialPos.longitude);
+      _endPosition = null;
+      _routePoints.add(_startPosition!);
       _isEmergencyActive = false;
-      _log = "Sistema Activo. Monitoreando...";
+      _log = "Ruta Iniciada, Grabando";
     });
 
     // Bucle principal: Cada 5 segundos
@@ -98,10 +106,33 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _stopTracking() {
     _monitorTimer?.cancel();
-    setState(() {
-      _isTracking = false;
-      _log = "Monitoreo Detenido.";
-    });
+
+    if (_routePoints.isNotEmpty) {
+      //  Marcar el final
+      setState(() {
+        _isTracking = false;
+        _endPosition = _routePoints.last;
+        _log = "Ruta finalizada. Distancia visualizada.";
+      });
+
+      //  Ajustar la cámara para ver toda la ruta (Fit Bounds)
+      // Usamos LatLngBounds para calcular el recuadro que contiene todos los puntos
+      if (_routePoints.length > 1) {
+        final bounds = LatLngBounds.fromPoints(_routePoints);
+        // CameraFit.bounds es la forma moderna en flutter_map v6/v7
+        _mapController.fitCamera(
+          CameraFit.bounds(
+            bounds: bounds,
+            padding: const EdgeInsets.all(50.0), // Margen para que no quede pegado al borde
+          ),
+        );
+      }
+    } else {
+      setState(() {
+        _isTracking = false;
+        _log = "Monitoreo detenido sin ruta.";
+      });
+    }
   }
 
   // LÓGICA DE EMERGENCIA
@@ -204,11 +235,60 @@ class _HomeScreenState extends State<HomeScreen> {
           // Pestaña Mapa
           FlutterMap(
             mapController: _mapController,
-            options: MapOptions(initialCenter: _currentLocation, initialZoom: 15.0),
+            options: MapOptions(
+              initialCenter: _currentLocation,
+              initialZoom: 15.0,
+              // Opcional: interactionOptions para mejorar la experiencia táctil
+            ),
             children: [
-              TileLayer(urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', userAgentPackageName: 'com.example.safe_ride'),
-              PolylineLayer(polylines: [Polyline(points: _routePoints, strokeWidth: 5.0, color: Colors.blue)]),
-              MarkerLayer(markers: [Marker(point: _currentLocation, width: 60, height: 60, child: const Icon(Icons.location_pin, color: Colors.red, size: 50))]),
+              TileLayer(
+                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                userAgentPackageName: 'com.example.safe_ride',
+              ),
+
+              // La Línea de la Ruta
+              PolylineLayer(
+                polylines: [
+                  Polyline(
+                    points: _routePoints,
+                    strokeWidth: 5.0,
+                    color: Colors.blue,
+                  ),
+                ],
+              ),
+
+              // Marcadores (Inicio, Fin y Actual)
+              MarkerLayer(
+                markers: [
+                  // MARCADOR DE INICIO (Verde) - Solo si existe
+                  if (_startPosition != null)
+                    Marker(
+                      point: _startPosition!,
+                      width: 60,
+                      height: 60,
+                      child: const Icon(Icons.flag, color: Colors.green, size: 40),
+                      alignment: Alignment.topCenter, // Para que el palo de la bandera toque el punto
+                    ),
+
+                  // MARCADOR DE FIN (Rojo/Bandera) - Solo si terminamos
+                  if (_endPosition != null && !_isTracking)
+                    Marker(
+                      point: _endPosition!,
+                      width: 60,
+                      height: 60,
+                      child: const Icon(Icons.sports_score, color: Colors.black, size: 40),
+                    ),
+
+                  // MARCADOR DE POSICIÓN ACTUAL (Solo mientras rastreamos)
+                  if (_isTracking)
+                    Marker(
+                      point: _currentLocation,
+                      width: 60,
+                      height: 60,
+                      child: const Icon(Icons.directions_bike, color: Colors.indigo, size: 40),
+                    ),
+                ],
+              ),
             ],
           ),
         ],
