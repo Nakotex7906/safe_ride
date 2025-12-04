@@ -37,6 +37,10 @@ dependencies:
   permission_handler: ^11.3.0
   # Para enviar datos a ThingsBoard (HTTP es más sencillo que MQTT para empezar)
   http: ^1.2.0
+  mailer: ^6.0.0
+  flutter_map: ^7.0.0
+  latlong2: ^0.9.1
+  flutter_dotenv: ^5.1.0
   # Gestión de estado y arquitectura (recomendado para Clean Arch)
   provider: ^6.1.1
   # Para comparar objetos (útil en modelos)
@@ -67,6 +71,8 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+  assets:
+    - .env
 
   # To add assets to your application, add an assets section, like this:
   # assets:
