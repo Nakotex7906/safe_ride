@@ -54,83 +54,173 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _startTracking() async {
-    Position initialPos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-    LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) return;
+    //  Verificar si el GPS está encendido
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('El GPS está desactivado. Por favor enciéndelo.')),
+        );
+      }
+      return;
     }
 
-    setState(() {
-      _isTracking = true;
-      _routePoints.clear();
-      _startPosition = LatLng(initialPos.latitude, initialPos.longitude);
-      _endPosition = null;
-      _routePoints.add(_startPosition!);
-      _isEmergencyActive = false;
-      _log = "Ruta Iniciada, Grabando";
-    });
+    //  Verificar Permisos
+    LocationPermission permission = await Geolocator.checkPermission();
 
-    // Bucle principal: Cada 5 segundos
-    _monitorTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
-      try {
-        if (_isEmergencyActive) return; // Si hay una emergencia en curso, pausamos el monitoreo normal
-
-        //  GPS y ThingsBoard
-        Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-        final newPoint = LatLng(pos.latitude, pos.longitude);
-        await _tbService.sendLocation(pos.latitude, pos.longitude);
-
-        //  Verificar Caída
-        bool caidaDetectada = await _tbService.checkFallStatus();
-
-        if (caidaDetectada && !_isEmergencyActive) {
-          // INICIAR PROTOCOLO DE EMERGENCIA (Cuenta regresiva)
-          _startEmergencyCountdown(pos);
+    if (permission == LocationPermission.denied) {
+      // Si es la primera vez o se denegó temporalmente, pedimos permiso
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Permiso de ubicación denegado.')),
+          );
         }
-
-        // C. Actualizar UI
-        if (mounted && !_isEmergencyActive) {
-          setState(() {
-            _currentLocation = newPoint;
-            _routePoints.add(newPoint);
-            _log = "Lat: ${pos.latitude.toStringAsFixed(4)} | Lng: ${pos.longitude.toStringAsFixed(4)}";
-            if (_selectedIndex == 1) _mapController.move(newPoint, 16.0);
-          });
-        }
-      } catch (e) {
-        print("Error bucle: $e");
+        return;
       }
-    });
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      //  Caso CRÍTICO: El usuario bloqueó el permiso permanentemente
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text("Permiso Necesario"),
+            content: const Text(
+                "El permiso de ubicación está bloqueado permanentemente. Necesitas habilitarlo en la configuración de la App."),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text("Cancelar"),
+              ),
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  Geolocator.openAppSettings(); // Abre la configuración del celular
+                },
+                child: const Text("Abrir Configuración"),
+              ),
+            ],
+          ),
+        );
+      }
+      return;
+    }
+
+    // Iniciar el rastreo
+    try {
+      Position initialPos = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high
+      );
+
+      setState(() {
+        _isTracking = true;
+        _routePoints.clear();
+
+        // Guardamos inicio
+        _startPosition = LatLng(initialPos.latitude, initialPos.longitude);
+        _endPosition = null;
+
+        // Agregamos el punto inicial
+        _routePoints.add(_startPosition!);
+
+        _isEmergencyActive = false;
+        _log = "Ruta Iniciada. Monitoreando...";
+      });
+
+      // Iniciamos el Timer llamando a la función auxiliar
+      _monitorTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
+        await _processTrackingTick();
+      });
+
+    } catch (e) {
+      print("Error al iniciar GPS: $e");
+      setState(() => _log = "Error obteniendo GPS inicial.");
+    }
+  }
+
+  // Función auxiliar que se ejecuta cada 5 segundos
+  Future<void> _processTrackingTick() async {
+    try {
+      if (_isEmergencyActive) return; // Si hay emergencia, no hacemos nada
+
+      //  Obtener posición actual
+      Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+      final newPoint = LatLng(pos.latitude, pos.longitude);
+
+      //  Enviar a ThingsBoard
+      await _tbService.sendLocation(pos.latitude, pos.longitude);
+
+      //  Verificar Caída
+      bool caidaDetectada = await _tbService.checkFallStatus();
+
+      if (caidaDetectada && !_isEmergencyActive) {
+        _startEmergencyCountdown(pos);
+      }
+
+      //  Actualizar UI (Mapa y Texto)
+      if (mounted && !_isEmergencyActive) {
+        setState(() {
+          _currentLocation = newPoint;
+          _routePoints.add(newPoint);
+          _log = "Lat: ${pos.latitude.toStringAsFixed(4)} | Lng: ${pos.longitude.toStringAsFixed(4)}";
+
+          if (_selectedIndex == 1) _mapController.move(newPoint, 16.0);
+        });
+      }
+    } catch (e) {
+      print("Error en el ciclo de rastreo: $e");
+    }
   }
 
   void _stopTracking() {
     _monitorTimer?.cancel();
 
     if (_routePoints.isNotEmpty) {
+      double totalDistanceMeters = 0;
+      const distanceCalculator = Distance();
+
+      for (int i = 0; i < _routePoints.length - 1; i++) {
+        // Sumamos la distancia entre el punto actual y el siguiente
+        totalDistanceMeters += distanceCalculator.as(
+            LengthUnit.Meter,
+            _routePoints[i],
+            _routePoints[i + 1]
+        );
+      }
+
+      // Formatear el texto (km si es largo, m si es corto)
+      String distanceText;
+      if (totalDistanceMeters >= 1000) {
+        distanceText = "${(totalDistanceMeters / 1000).toStringAsFixed(2)} km";
+      } else {
+        distanceText = "${totalDistanceMeters.toStringAsFixed(0)} m";
+      }
+
       //  Marcar el final
       setState(() {
         _isTracking = false;
-        _endPosition = _routePoints.last;
-        _log = "Ruta finalizada. Distancia visualizada.";
+        _endPosition = _routePoints.last; // Marcamos la bandera de fin
+        // Mostramos la distancia en el log de pantalla
+        _log = "Ruta finalizada. Recorrido: $distanceText";
       });
 
-      //  Ajustar la cámara para ver toda la ruta (Fit Bounds)
-      // Usamos LatLngBounds para calcular el recuadro que contiene todos los puntos
+      //  Ajustar cámara para ver el recorrido
       if (_routePoints.length > 1) {
         final bounds = LatLngBounds.fromPoints(_routePoints);
-        // CameraFit.bounds es la forma moderna en flutter_map v6/v7
         _mapController.fitCamera(
           CameraFit.bounds(
             bounds: bounds,
-            padding: const EdgeInsets.all(50.0), // Margen para que no quede pegado al borde
+            padding: const EdgeInsets.all(50.0),
           ),
         );
       }
     } else {
       setState(() {
         _isTracking = false;
-        _log = "Monitoreo detenido sin ruta.";
+        _log = "Monitoreo detenido sin movimiento.";
       });
     }
   }
