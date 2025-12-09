@@ -5,6 +5,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:safe_ride/core/services/thingsboard_service.dart';
 import 'package:safe_ride/core/services/email_service.dart';
+import 'package:safe_ride/core/services/storage_service.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -21,11 +22,13 @@ class _HomeScreenState extends State<HomeScreen> {
   // Servicios
   final _tbService = ThingsboardService();
   final _emailService = EmailService();
+  final _storageService = StorageService();
 
   // Estados
   bool _isTracking = false;
   String _log = "Presiona INICIAR para monitorear";
   Timer? _monitorTimer; // Timer para GPS y ThingsBoard
+  String? _emergencyContact; // Variable para guardar el correo en memoria local
 
   // Control de Emergencia
   bool _isEmergencyActive = false; // Para saber si ya estamos en cuenta regresiva
@@ -43,6 +46,69 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
+  // NUEVO: Cargar contacto
+  Future<void> _loadContactInfo() async {
+    String? email = await _storageService.getEmergencyEmail();
+    setState(() {
+      _emergencyContact = email;
+      // Si ya hay contacto, actualizamos el log para que el usuario sepa
+      if (email != null) {
+        _log = "Contacto configurado: $email\nListo para iniciar.";
+      } else {
+        _log = "Configura un contacto de emergencia antes de iniciar.";
+      }
+    });
+  }
+
+  // NUEVO: Diálogo para editar contacto
+  void _showConfigDialog() {
+    final TextEditingController emailController = TextEditingController(text: _emergencyContact);
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Contacto de Emergencia"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text("Ingresa el correo de la persona a la que avisaremos si te caes."),
+            const SizedBox(height: 10),
+            TextField(
+              controller: emailController,
+              keyboardType: TextInputType.emailAddress,
+              decoration: const InputDecoration(
+                labelText: "Correo electrónico",
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.email),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancelar")),
+          ElevatedButton(
+            onPressed: () async {
+              final email = emailController.text.trim();
+              if (email.isNotEmpty && email.contains('@')) {
+                await _storageService.saveEmergencyEmail(email);
+                await _loadContactInfo();
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text("Contacto guardado: $email"))
+                );
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("Ingresa un correo válido"), backgroundColor: Colors.red)
+                );
+              }
+            },
+            child: const Text("Guardar"),
+          ),
+        ],
+      ),
+    );
+  }
+
   // LÓGICA DE MONITOREO
 
   Future<void> _toggleTracking() async {
@@ -54,6 +120,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _startTracking() async {
+    if (_emergencyContact == null || _emergencyContact!.isEmpty) {
+      _showConfigDialog();
+      return;
+    }
     //  Verificar si el GPS está encendido
     bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
@@ -252,8 +322,12 @@ class _HomeScreenState extends State<HomeScreen> {
             Navigator.of(context).pop();
             setState(() => _log = "Enviando ayuda...");
 
-            // Enviar correo
-            bool sent = await _emailService.sendEmergencyEmail(pos.latitude, pos.longitude);
+            // AQUÍ PASAMOS EL CORREO DINÁMICO
+            bool sent = await _emailService.sendEmergencyEmail(
+                pos.latitude,
+                pos.longitude,
+                _emergencyContact!
+            );
 
             // IMPORTANTE: Resetear la alarma en ThingsBoard también aquí,
             // porque la emergencia ya fue procesada.
@@ -280,21 +354,56 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // SOS Manual (Sin cuenta regresiva, inmediato)
   Future<void> _sendPanicAlert() async {
+    if (_emergencyContact == null || _emergencyContact!.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(" Primero configura un contacto de emergencia (Icono engranaje)"),
+            backgroundColor: Colors.red,
+          )
+      );
+      return;
+    }
+
+    // VALIDACIÓN DE GPS
     if (_routePoints.isNotEmpty) {
       final last = _routePoints.last;
-      bool sent = await _emailService.sendEmergencyEmail(last.latitude, last.longitude);
+
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Enviando alerta...")));
+
+      bool sent = await _emailService.sendEmergencyEmail(
+          last.latitude,
+          last.longitude,
+          _emergencyContact!
+      );
+
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(sent ? "Alerta enviada" : "Error")));
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(sent ? "Alerta enviada a $_emergencyContact" : "Error de envío"),
+              backgroundColor: sent ? Colors.green : Colors.red,
+            )
+        );
       }
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Sin señal GPS")));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Sin señal GPS (Inicia ruta o espera señal)")));
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Safe Ride'), backgroundColor: Colors.indigo, foregroundColor: Colors.white),
+      appBar: AppBar(
+        title: const Text('Safe Ride'),
+        backgroundColor: Colors.indigo,
+        foregroundColor: Colors.white,
+        actions: [
+          // Botón en la barra superior para configurar contacto
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: _showConfigDialog,
+          )
+        ],
+      ),
       body: IndexedStack(
         index: _selectedIndex,
         children: [
@@ -315,9 +424,13 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 20),
                 ElevatedButton.icon(
                   onPressed: _sendPanicAlert,
-                  style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
-                  icon: const Icon(Icons.sos),
-                  label: const Text("SOS MANUAL"),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
+                  ),
+                  icon: const Icon(Icons.sos, size: 30),
+                  label: const Text("SOS MANUAL", style: TextStyle(fontSize: 18)),
                 )
               ],
             ),
@@ -325,60 +438,15 @@ class _HomeScreenState extends State<HomeScreen> {
           // Pestaña Mapa
           FlutterMap(
             mapController: _mapController,
-            options: MapOptions(
-              initialCenter: _currentLocation,
-              initialZoom: 15.0,
-              // Opcional: interactionOptions para mejorar la experiencia táctil
-            ),
+            options: MapOptions(initialCenter: _currentLocation, initialZoom: 15.0),
             children: [
-              TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                userAgentPackageName: 'com.example.safe_ride',
-              ),
-
-              // La Línea de la Ruta
-              PolylineLayer(
-                polylines: [
-                  Polyline(
-                    points: _routePoints,
-                    strokeWidth: 5.0,
-                    color: Colors.blue,
-                  ),
-                ],
-              ),
-
-              // Marcadores (Inicio, Fin y Actual)
-              MarkerLayer(
-                markers: [
-                  // MARCADOR DE INICIO (Verde) - Solo si existe
-                  if (_startPosition != null)
-                    Marker(
-                      point: _startPosition!,
-                      width: 60,
-                      height: 60,
-                      child: const Icon(Icons.flag, color: Colors.green, size: 40),
-                      alignment: Alignment.topCenter, // Para que el palo de la bandera toque el punto
-                    ),
-
-                  // MARCADOR DE FIN (Rojo/Bandera) - Solo si terminamos
-                  if (_endPosition != null && !_isTracking)
-                    Marker(
-                      point: _endPosition!,
-                      width: 60,
-                      height: 60,
-                      child: const Icon(Icons.sports_score, color: Colors.black, size: 40),
-                    ),
-
-                  // MARCADOR DE POSICIÓN ACTUAL (Solo mientras rastreamos)
-                  if (_isTracking)
-                    Marker(
-                      point: _currentLocation,
-                      width: 60,
-                      height: 60,
-                      child: const Icon(Icons.directions_bike, color: Colors.indigo, size: 40),
-                    ),
-                ],
-              ),
+              TileLayer(urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', userAgentPackageName: 'com.example.safe_ride'),
+              PolylineLayer(polylines: [Polyline(points: _routePoints, strokeWidth: 5.0, color: Colors.blue)]),
+              MarkerLayer(markers: [
+                if (_startPosition != null) Marker(point: _startPosition!, width: 60, height: 60, child: const Icon(Icons.flag, color: Colors.green, size: 40)),
+                if (_endPosition != null && !_isTracking) Marker(point: _endPosition!, width: 60, height: 60, child: const Icon(Icons.sports_score, color: Colors.black, size: 40)),
+                if (_isTracking) Marker(point: _currentLocation, width: 60, height: 60, child: const Icon(Icons.directions_bike, color: Colors.indigo, size: 40)),
+              ]),
             ],
           ),
         ],
@@ -444,8 +512,8 @@ class _EmergencyDialogState extends State<EmergencyDialog> {
           Expanded(
             child: const Text(
               "¿CAÍDA DETECTADA?",
-              style: TextStyle(fontWeight: FontWeight.bold), // Texto en negrita se ve mejor
-              maxLines: 2, // Permite hasta 2 líneas
+              style: TextStyle(fontWeight: FontWeight.bold),
+              maxLines: 2,
             ),
           ),
         ],
@@ -464,7 +532,7 @@ class _EmergencyDialogState extends State<EmergencyDialog> {
           ),
           const SizedBox(height: 10),
           Text(
-            "$_secondsRemaining",
+            "$_secondsRemaining", // Asegúrate de tener la variable _secondsRemaining definida en esta clase
             style: const TextStyle(fontSize: 60, fontWeight: FontWeight.bold, color: Colors.red),
           ),
           const Text("segundos"),
